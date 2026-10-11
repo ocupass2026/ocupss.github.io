@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<script src="config.js" charset="utf-8"></script>
+<script src="config-core.js" charset="utf-8"></script>
+<script>if(!window.appCfg){window.appCfg=function(k,d){return d};window.appCfgIn=function(k,s,d){return d};}</script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>แกลเลอรี่ภาพหมู่บ้าน</title>
+
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script>
+/* ─── LIFF Mini App: ใช้ LIFF ID เดียวเปิดได้ทุกหน้า (https://liff.line.me/<ID>/<หน้า>.html) ───
+   ตั้งค่าที่ system_settings 'liff_mini_app_id' — ถ้ายังไม่ตั้งจะใช้ LIFF ID เดิมของแต่ละหน้า (ย้ายทีละหน้าได้) */
+function pickLiffId(rows, legacyKey) {
+    var m = {}; (rows || []).forEach(function (r) { m[r.key] = r.value; });
+    function ok(v) {
+        if (typeof v === 'string') { try { var j = JSON.parse(v); if (typeof j === 'string') v = j; } catch (e) {} }
+        v = v == null ? '' : String(v).trim(); return v && v.indexOf('YOUR_') !== 0 ? v : '';
+    }
+    return ok(m.liff_mini_app_id) || ok(m[legacyKey]) || '';
+}
+</script>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+    body { font-family: 'Prompt', sans-serif; background: #F0F2F5; }
+    @keyframes slideUp { from { opacity:0; transform: translateY(10px); } to { opacity:1; transform: translateY(0); } }
+    .animate-slide-up { animation: slideUp 0.3s ease-out; }
+    .heart-pop { animation: pop 0.3s ease; }
+    @keyframes pop { 0%{transform:scale(1);} 50%{transform:scale(1.3);} 100%{transform:scale(1);} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const SUPABASE_URL = appCfg('SUPABASE_URL', 'https://zmdywddraaeegzkvpwsw.supabase.co');
+    const SUPABASE_KEY = appCfg('SUPABASE_KEY', 'sb_publishable_v6Srw8MV1VE-K3A8alvqHQ_T_O26qVQ');
+    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    const EDGE_FUNCTION_URL = appCfg('EDGE_FUNCTION_URL', 'https://zmdywddraaeegzkvpwsw.supabase.co/functions/v1/line-webhook');
+
+    const MONTH_NAMES_TH = ['', 'มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน','กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
+
+    function currentMonthYear() {
+        const now = new Date();
+        return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+    }
+    function monthLabel(monthYear) {
+        const parts = monthYear.split('-');
+        return MONTH_NAMES_TH[parseInt(parts[1])] + ' ' + (parseInt(parts[0]) + 543);
+    }
+    function timeAgo(dateStr) {
+        const diffMs = Date.now() - new Date(dateStr).getTime();
+        const mins = Math.floor(diffMs / 60000);
+        if (mins < 1) return 'เมื่อสักครู่';
+        if (mins < 60) return mins + ' นาทีที่แล้ว';
+        const hrs = Math.floor(mins / 60);
+        if (hrs < 24) return hrs + ' ชม.ที่แล้ว';
+        const days = Math.floor(hrs / 24);
+        if (days < 30) return days + ' วันที่แล้ว';
+        return new Date(dateStr).toLocaleDateString('th-TH', { day:'numeric', month:'short' });
+    }
+
+    async function uploadToStorage(blob) {
+        const fileName = 'public/' + Date.now() + '_' + Math.random().toString(36).substring(7) + '.jpg';
+        const { error } = await supabaseClient.storage.from('gallery_images').upload(fileName, blob);
+        if (error) throw error;
+        const { data } = supabaseClient.storage.from('gallery_images').getPublicUrl(fileName);
+        return data.publicUrl;
+    }
+
+    let _liffIdCache = null;
+    async function getLiffId() {
+        if (_liffIdCache !== null) return _liffIdCache;
+        const { data: cfgRows } = await supabaseClient
+            .from('system_settings').select('key,value').in('key', ['liff_mini_app_id', 'gallery_liff_id']);
+        _liffIdCache = pickLiffId(cfgRows, 'gallery_liff_id');
+        return _liffIdCache;
+    }
+    let _liffInited = false;
+    async function ensureLiffInit() {
+        if (_liffInited) return;
+        const liffId = await getLiffId();
+        if (!liffId) throw new Error('ระบบยังไม่ได้ตั้งค่า LIFF — ติดต่อแอดมินค่ะ');
+        await liff.init({ liffId });
+        _liffInited = true;
+    }
+    async function requireLogin() {
+        await ensureLiffInit();
+        if (!liff.isLoggedIn()) {
+            liff.login({ redirectUri: window.location.href });
+            return null;
+        }
+        const profile = await liff.getProfile();
+        return profile;
+    }
+
+    const CommentSection = ({ photoId, isOpen, currentUid, currentProfile, onNeedLogin, onCommentAdded }) => {
+        const [comments, setComments] = useState([]);
+        const [loading, setLoading] = useState(false);
+        const [text, setText] = useState('');
+        const [sending, setSending] = useState(false);
+
+        useEffect(() => {
+            if (!isOpen) return;
+            setLoading(true);
+            fetch(EDGE_FUNCTION_URL + '/api/admin/audience/gallery_comment_list?photoId=' + photoId)
+                .then(r => r.json()).then(d => setComments(d.comments || []))
+                .catch(() => {}).finally(() => setLoading(false));
+        }, [isOpen]);
+
+        const submit = async () => {
+            if (!text.trim()) return;
+            let uid = currentUid, profile = currentProfile;
+            if (!uid) {
+                profile = await onNeedLogin();
+                if (!profile) return;
+                uid = profile.userId;
+            }
+            setSending(true);
+            try {
+                const res = await fetch(EDGE_FUNCTION_URL + '/api/admin/audience/gallery_comment_add', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        photoId: photoId, uid: uid,
+                        lineDisplayName: profile && profile.displayName,
+                        linePictureUrl: profile && profile.pictureUrl,
+                        commentText: text.trim(),
+                    })
+                });
+                const d = await res.json();
+                if (!res.ok) throw new Error(d.error);
+                setComments(prev => [...prev, d.comment]);
+                setText('');
+                onCommentAdded();
+            } catch (e) {
+                alert(e.message || 'คอมเมนต์ไม่สำเร็จ');
+            } finally {
+                setSending(false);
+            }
+        };
+
+        if (!isOpen) return null;
+
+        return (
+            <div className="border-t border-slate-100 px-4 py-3 bg-slate-50/60 animate-slide-up">
+                {loading && <div className="text-xs text-slate-400 text-center py-2">⏳ กำลังโหลดคอมเมนต์...</div>}
+                {!loading && comments.length === 0 && <div className="text-xs text-slate-400 text-center py-2">ยังไม่มีคอมเมนต์ เป็นคนแรกสิ!</div>}
+                <div className="space-y-2.5 mb-3">
+                    {comments.map(c => (
+                        <div key={c.id} className="flex items-start gap-2">
+                            {c.line_picture_url
+                                ? <img src={c.line_picture_url} className="w-7 h-7 rounded-full object-cover flex-shrink-0 mt-0.5" />
+                                : <div className="w-7 h-7 rounded-full bg-slate-200 flex-shrink-0 mt-0.5" />}
+                            <div className="bg-white rounded-2xl px-3 py-2 flex-1 shadow-sm">
+                                <div className="text-xs font-bold text-slate-700">{c.line_display_name || 'ไม่ระบุชื่อ'}</div>
+                                <div className="text-xs text-slate-600 mt-0.5 break-words">{c.comment_text}</div>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+                <div className="flex gap-2 items-center">
+                    <input value={text} onChange={e => setText(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && submit()}
+                        placeholder="แสดงความคิดเห็น..."
+                        className="flex-1 px-3 py-2 bg-white border border-slate-200 rounded-full text-xs outline-none focus:border-violet-400" />
+                    <button onClick={submit} disabled={sending || !text.trim()}
+                        className="w-8 h-8 bg-violet-500 text-white rounded-full flex items-center justify-center flex-shrink-0 disabled:opacity-40">
+                        {sending ? '⏳' : '➤'}
+                    </button>
+                </div>
+            </div>
+        );
+    };
+
+    const App = () => {
+        const [activeTab, setActiveTab] = useState('gallery');
+        const [currentUid, setCurrentUid] = useState(null);
+        const [currentProfile, setCurrentProfile] = useState(null);
+
+        const [photos, setPhotos] = useState([]);
+        const [loading, setLoading] = useState(true);
+        const [selectedMonth] = useState(currentMonthYear());
+        const [openCommentId, setOpenCommentId] = useState(null);
+
+        const [caption, setCaption] = useState('');
+        const [houseNo, setHouseNo] = useState('');
+        const [imageBlob, setImageBlob] = useState(null);
+        const [imagePreview, setImagePreview] = useState(null);
+        const [uploading, setUploading] = useState(false);
+        const [toast, setToast] = useState(null);
+
+        useEffect(() => {
+            (async () => {
+                try {
+                    const liffId = await getLiffId();
+                    if (!liffId) return;
+                    await liff.init({ liffId });
+                    if (liff.isLoggedIn()) {
+                        const profile = await liff.getProfile();
+                        setCurrentUid(profile.userId);
+                        setCurrentProfile(profile);
+                    }
+                    _liffInited = true;
+                } catch (e) {
+                    console.warn('silent liff check failed', e);
+                }
+            })();
+        }, []);
+
+        const loadPhotos = async () => {
+            setLoading(true);
+            try {
+                const params = new URLSearchParams({ month: selectedMonth });
+                if (currentUid) params.set('uid', currentUid);
+                const res = await fetch(EDGE_FUNCTION_URL + '/api/admin/audience/gallery_list?' + params);
+                const d = await res.json();
+                if (!res.ok) throw new Error(d.error || 'โหลดไม่สำเร็จ');
+                setPhotos(d.items || []);
+            } catch (e) {
+                console.error('loadPhotos', e);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        useEffect(() => { loadPhotos(); }, [currentUid]);
+
+        const showToast = (msg, type) => {
+            setToast({ msg: msg, type: type || 'success' });
+            setTimeout(() => setToast(null), 2500);
+        };
+
+        const handleNeedLogin = async () => {
+            if (currentUid) return currentProfile;
+            try {
+                const profile = await requireLogin();
+                if (!profile) return null;
+                setCurrentUid(profile.userId);
+                setCurrentProfile(profile);
+                return profile;
+            } catch (e) {
+                showToast(e.message || 'เชื่อมต่อ LINE ไม่สำเร็จ', 'error');
+                return null;
+            }
+        };
+
+        const handleImageChange = (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                setImageBlob(file);
+                const reader = new FileReader();
+                reader.onloadend = () => setImagePreview(reader.result);
+                reader.readAsDataURL(file);
+            }
+        };
+
+        const goUploadTab = async () => {
+            const profile = await handleNeedLogin();
+            if (!profile) return;
+            setActiveTab('upload');
+        };
+
+        const submitUpload = async () => {
+            if (!imageBlob) return showToast('เลือกรูปภาพก่อนค่ะ', 'error');
+            const profile = await handleNeedLogin();
+            if (!profile) return;
+
+            setUploading(true);
+            try {
+                const imageUrl = await uploadToStorage(imageBlob);
+                const res = await fetch(EDGE_FUNCTION_URL + '/api/admin/audience/gallery_upload', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        uid: profile.userId, lineDisplayName: profile.displayName || null,
+                        linePictureUrl: profile.pictureUrl || null,
+                        houseNo: houseNo.trim() || null, imageUrl: imageUrl, caption: caption.trim() || null,
+                    })
+                });
+                const d = await res.json();
+                if (!res.ok) throw new Error(d.error || 'อัปโหลดไม่สำเร็จ');
+
+                showToast('🎉 ส่งภาพเรียบร้อย รอแอดมินตรวจสอบก่อนขึ้นฟีดนะคะ');
+                setCaption(''); setHouseNo(''); setImageBlob(null); setImagePreview(null);
+                setActiveTab('gallery');
+                loadPhotos();
+            } catch (e) {
+                showToast(e.message || 'เกิดข้อผิดพลาด', 'error');
+            } finally {
+                setUploading(false);
+            }
+        };
+
+        const vote = async (photoId) => {
+            const profile = await handleNeedLogin();
+            if (!profile) return;
+
+            setPhotos(prev => prev.map(p => p.id === photoId ? Object.assign({}, p, { hasVoted: true, vote_count: p.vote_count + 1 }) : p));
+            try {
+                const res = await fetch(EDGE_FUNCTION_URL + '/api/admin/audience/gallery_vote', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ photoId: photoId, voterUid: profile.userId })
+                });
+                const d = await res.json();
+                if (!res.ok) throw new Error(d.error || 'โหวตไม่สำเร็จ');
+            } catch (e) {
+                setPhotos(prev => prev.map(p => p.id === photoId ? Object.assign({}, p, { hasVoted: false, vote_count: Math.max(0, p.vote_count - 1) }) : p));
+                showToast(e.message, 'error');
+            }
+        };
+
+        return (
+            <div className="max-w-md mx-auto min-h-screen bg-[#F0F2F5] relative">
+                <div className="sticky top-0 z-30 bg-white shadow-sm px-4 py-3 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                        <span className="text-2xl">📸</span>
+                        <div>
+                            <h1 className="font-bold text-slate-800 text-sm leading-tight">แกลเลอรี่หมู่บ้าน</h1>
+                            <p className="text-[10px] text-slate-400">🏆 {monthLabel(selectedMonth)}</p>
+                        </div>
+                    </div>
+                    {currentProfile ? (
+                        <img src={currentProfile.pictureUrl} className="w-8 h-8 rounded-full border-2 border-violet-200" />
+                    ) : (
+                        <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 text-xs">👤</div>
+                    )}
+                </div>
+
+                <div className="bg-white mx-0 px-4 py-3 mb-2 shadow-sm">
+                    <button onClick={goUploadTab}
+                        className="w-full flex items-center gap-3 bg-slate-100 hover:bg-slate-200 rounded-full px-4 py-2.5 text-left transition-colors">
+                        <span className="text-lg">📷</span>
+                        <span className="text-sm text-slate-500">แชร์ภาพบรรยากาศในหมู่บ้าน...</span>
+                    </button>
+                </div>
+
+                {activeTab === 'gallery' && (
+                    <div className="animate-slide-up">
+                        {loading && <div className="text-center py-16 text-slate-400"><span className="text-2xl">⏳</span></div>}
+
+                        {!loading && photos.length === 0 && (
+                            <div className="text-center py-16 text-slate-400 bg-white mx-4 rounded-2xl">
+                                <span className="text-4xl block mb-2">📭</span>
+                                ยังไม่มีภาพในเดือนนี้<br/>เป็นคนแรกที่แชร์สิ!
+                            </div>
+                        )}
+
+                        <div className="space-y-2">
+                            {photos.map((p, idx) => (
+                                <div key={p.id} className="bg-white shadow-sm">
+                                    <div className="flex items-center gap-2.5 px-4 py-3">
+                                        {p.line_picture_url
+                                            ? <img src={p.line_picture_url} className="w-10 h-10 rounded-full object-cover" />
+                                            : <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center">👤</div>}
+                                        <div className="flex-1 min-w-0">
+                                            <div className="text-sm font-bold text-slate-800 truncate">{p.line_display_name || p.house_no || 'ไม่ระบุชื่อ'}</div>
+                                            <div className="text-[11px] text-slate-400">
+                                                {p.house_no ? ('🏠 ' + p.house_no + ' · ') : ''}{timeAgo(p.created_at)}
+                                            </div>
+                                        </div>
+                                        {idx === 0 && p.vote_count > 0 && (
+                                            <span className="bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-1 rounded-full flex-shrink-0">🏆 อันดับ 1</span>
+                                        )}
+                                    </div>
+
+                                    {p.caption && <p className="text-sm text-slate-700 px-4 pb-2">{p.caption}</p>}
+
+                                    <img src={p.image_url} className="w-full max-h-[420px] object-cover" />
+
+                                    <div className="flex items-center justify-between px-4 py-2 text-xs text-slate-400">
+                                        <span>{p.vote_count > 0 ? ('❤️ ' + p.vote_count + ' คนถูกใจ') : ''}</span>
+                                        <span>{p.commentCount > 0 ? (p.commentCount + ' ความคิดเห็น') : ''}</span>
+                                    </div>
+
+                                    <div className="flex border-t border-slate-100">
+                                        <button onClick={() => !p.hasVoted && vote(p.id)}
+                                            className={'flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-bold transition-colors ' + (p.hasVoted ? 'text-rose-500' : 'text-slate-500')}>
+                                            <span className={p.hasVoted ? 'heart-pop' : ''}>{p.hasVoted ? '❤️' : '🤍'}</span> ถูกใจ
+                                        </button>
+                                        <button onClick={() => setOpenCommentId(openCommentId === p.id ? null : p.id)}
+                                            className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-bold text-slate-500">
+                                            💬 แสดงความคิดเห็น
+                                        </button>
+                                    </div>
+
+                                    <CommentSection
+                                        photoId={p.id}
+                                        isOpen={openCommentId === p.id}
+                                        currentUid={currentUid}
+                                        currentProfile={currentProfile}
+                                        onNeedLogin={handleNeedLogin}
+                                        onCommentAdded={() => setPhotos(prev => prev.map(x => x.id === p.id ? Object.assign({}, x, { commentCount: (x.commentCount||0) + 1 }) : x))}
+                                    />
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {activeTab === 'upload' && (
+                    <div className="animate-slide-up bg-white mx-4 rounded-2xl shadow-sm p-4 space-y-4">
+                        <div className="flex items-center justify-between">
+                            <h2 className="font-bold text-slate-800">แชร์ภาพใหม่</h2>
+                            <button onClick={() => setActiveTab('gallery')} className="text-slate-400 text-sm">✕ ปิด</button>
+                        </div>
+
+                        <div className="bg-violet-50 border border-violet-200 rounded-2xl p-3 text-xs text-violet-700">
+                            📌 ภาพที่อัปโหลดจะ<b>รอแอดมินตรวจสอบก่อน</b> ถึงจะขึ้นฟีดให้คนอื่นเห็นค่ะ
+                        </div>
+
+                        <div>
+                            {imagePreview ? (
+                                <div className="relative">
+                                    <img src={imagePreview} className="w-full h-48 object-cover rounded-2xl border border-slate-200" />
+                                    <button onClick={() => { setImageBlob(null); setImagePreview(null); }}
+                                        className="absolute top-2 right-2 w-8 h-8 bg-black/50 text-white rounded-full flex items-center justify-center">✕</button>
+                                </div>
+                            ) : (
+                                <label className="flex flex-col items-center justify-center h-40 border-2 border-dashed border-slate-200 rounded-2xl cursor-pointer bg-slate-50">
+                                    <span className="text-3xl mb-1">📷</span>
+                                    <span className="text-xs text-slate-400">แตะเพื่อเลือกรูปภาพ</span>
+                                    <input type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
+                                </label>
+                            )}
+                        </div>
+
+                        <input value={houseNo} onChange={e => setHouseNo(e.target.value)}
+                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-violet-500 text-sm"
+                            placeholder="บ้านเลขที่ (ไม่บังคับ)" />
+
+                        <textarea value={caption} onChange={e => setCaption(e.target.value)} rows={3}
+                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-violet-500 text-sm resize-none"
+                            placeholder="เล่าเรื่องราวของภาพนี้สักนิด..." />
+
+                        <button onClick={submitUpload} disabled={uploading}
+                            className="w-full py-3.5 bg-violet-500 text-white rounded-2xl font-bold shadow-lg disabled:opacity-50">
+                            {uploading ? '⏳ กำลังอัปโหลด...' : '📤 โพสต์'}
+                        </button>
+                    </div>
+                )}
+
+                {toast && (
+                    <div className={'fixed bottom-6 left-1/2 -translate-x-1/2 px-5 py-3 rounded-2xl shadow-lg text-white text-sm font-bold z-50 animate-slide-up ' + (toast.type === 'error' ? 'bg-rose-500' : 'bg-emerald-500')}>
+                        {toast.msg}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
